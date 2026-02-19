@@ -8,3 +8,5 @@ discordbot
 *.out
 *.exe
 build/
+meowmsgclient
+meowmsg
