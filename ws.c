@@ -14,7 +14,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 
-#define MAX_WS_PAYLOAD 65536
+#define MAX_WS_PAYLOAD 16777216
 #define WS_OPCODE_CONTINUATION 0x0
 #define WS_OPCODE_TEXT 0x1
 #define WS_OPCODE_BINARY 0x2
@@ -75,10 +75,9 @@ static int append_to_message(ws_recv_ctx_t *ctx,
     if (needed > ctx->message_cap) {
         size_t new_cap = needed * 2;
         uint8_t *tmp = realloc(ctx->message_buf, new_cap);
-        if (!tmp)
-            return WS_ERROR;
-
+        if (!tmp) return WS_ERROR;
         ctx->message_buf = tmp;
+
         ctx->message_cap = new_cap;
     }
 
@@ -215,6 +214,8 @@ ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handsha
         hs->resp[hs->roff] = 0;
         if (strstr(hs->resp, "\r\n\r\n")) break;
     }
+    if (!strstr(hs->resp, "\r\n\r\n"))
+        return WS_HS_ERROR;
 
     unsigned char sha1_out[20];
     char concatenated[128];
@@ -241,6 +242,14 @@ ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handsha
     *end = '\0';
 
     if (strncmp(hs->resp, "HTTP/1.1 101", 12) != 0)
+        return WS_HS_ERROR;
+
+    char *upgrade = ascii_strcasestr(hs->resp, "upgrade:");
+    if (!upgrade || !ascii_strcasestr(upgrade, "websocket"))
+        return WS_HS_ERROR;
+
+    char *connection = ascii_strcasestr(hs->resp, "connection:");
+    if (!connection || !ascii_strcasestr(connection, "upgrade"))
         return WS_HS_ERROR;
 
     if (strcmp(accept, expected_key) == 0) return WS_HS_OK;
@@ -289,6 +298,7 @@ int ws_send_pong(int sock, const uint8_t *payload, size_t len) {
             free(frame);
             return -1;
         }
+        sleep_ms(1);
     }
 
     free(frame);
@@ -380,7 +390,8 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
                 if ((ctx->opcode & 0x08) && len7 > 125) return WS_ERROR;
                 if (len7 <= 125) {
                     ctx->payload_len = len7;
-
+                    ctx->payload_off = 0;
+                    ctx->ext_off = 0;
                     if (ctx->payload_len > MAX_WS_PAYLOAD) {
                         return WS_PAYLOAD_TOO_BIG;
                     }
@@ -396,8 +407,14 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
                     ctx->phase = ctx->masked ? WS_RECV_MASK : WS_RECV_PAYLOAD;
                 } else {
                     ctx->ext_len = (len7 == 126) ? 2 : 8;
+                    ctx->ext_off = 0;
                     ctx->phase = WS_RECV_EXT_LEN;
                 }
+
+                if (ctx->masked) {
+                    ctx->mask_off = 0; //sobb why are we still doing dis
+                }
+
                 break;
 
             case WS_RECV_EXT_LEN:
@@ -644,7 +661,7 @@ void* websocket_thread(void *ctx) {
 
     if (pre_ws_loop(flags, &ws_recv_ctx) != 0) {
         fprintf(stderr, "Failed pre-loop setup\n");
-        return NULL;
+        goto cleanup;
     }
 
     struct epoll_event events[1];
@@ -709,8 +726,10 @@ void* websocket_thread(void *ctx) {
     }
 
     //printf("[WS] Thread exiting...\n");
+    cleanup:
     ws_quit(&ws_recv_ctx);
     ws_clear_message(&ws_recv_ctx);
-    close(epfd);
+    if (epfd != -1)
+        close(epfd);
     return NULL;
 }
