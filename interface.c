@@ -151,6 +151,12 @@ void* interface(void *ctx) {
                         } else if (strncmp(input_buffer, "/join ", 6) == 0) {
                             strncpy(current_channel, input_buffer + 6, MAX_CHANNEL_NAME - 1);
                             wprintw(msg_win, "Switched to: %s\n", current_channel);
+                        } else if (strncmp(input_buffer, "/help", 6)==0) {
+                            wprintw(msg_win, "Available commands:\n");
+                            wprintw(msg_win, "/quit - Quit the application\n");
+                            wprintw(msg_win, "/sendraw <message> - Send a raw message\n");
+                            wprintw(msg_win, "/join <channel> - Join a channel\n");
+                            wprintw(msg_win, "/help - Display this help message\n");
                         }
                     } else {
                         push_message(current_channel, input_buffer, flags);
