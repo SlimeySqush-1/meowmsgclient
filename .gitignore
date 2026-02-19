@@ -1,0 +1,10 @@
+# Secrets
+env.c
+discordbot
+# Build artifacts
+*.o
+*.a
+*.so
+*.out
+*.exe
+build/
