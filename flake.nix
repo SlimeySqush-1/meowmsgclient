@@ -18,7 +18,7 @@
           ncurses,
           cjson,
           curl,
-          openssl,
+          openssl
         }:
         clangStdenv.mkDerivation {
           pname = "meowmsgclient";
@@ -28,7 +28,7 @@
             ncurses
             cjson
             curl
-            openssl,
+            openssl
           ];
 
           installPhase = ''
