@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <pthread.h>
 
 typedef enum {
     WS_HS_OK = 0,
@@ -10,18 +11,23 @@ typedef enum {
     WS_HS_ERROR
 } ws_hs_rc_t;
 
+typedef struct {
+    char **message;
+    size_t capacity;
+    size_t head;
+    size_t tail;
+    size_t count;
+    pthread_mutex_t lock;
+} ws_queue_t;
 
 typedef struct {
     atomic_bool running;
     int sock;
-    _Atomic(char *) json_inbound;
-    atomic_bool json_inbound_exists;
-    _Atomic(char *) json_outbound;
-    atomic_bool json_outbound_exists;
 
-    _Atomic(char*) console_outbound;
-    atomic_bool console_outbound_exists;
+    ws_queue_t json_inbound;
+    ws_queue_t json_outbound;
+    ws_queue_t console_outbound;
 
     atomic_int close_code;
-} ws_thread_flags_t;
+} ws_thread_ctx_t;
 #endif

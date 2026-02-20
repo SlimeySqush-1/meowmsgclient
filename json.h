@@ -6,7 +6,7 @@
 //A function that process the opcode, especially opcode 0 and its events
 //
 //flags: A pointer to the flags struct.
-void get_event(ws_thread_flags_t *flags);
+void get_event(ws_thread_ctx_t *flags);
 
 //Thread shii or som idk
 //

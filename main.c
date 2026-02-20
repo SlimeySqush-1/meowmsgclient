@@ -12,6 +12,7 @@
 
 #define PORT 8080
 #define HOST "127.0.0.1"
+#define RB_SIZE 4096
 
 #include "utils.h"
 
@@ -37,15 +38,21 @@ int main(void) {
         sleep(1); //why sleep? idek
     }
 
-    ws_thread_flags_t ws_flags;
+    ws_thread_ctx_t ws_flags;
     ws_flags.sock = sock;
     ws_flags.running = true;
-    ws_flags.json_inbound_exists = 0;
-    ws_flags.json_outbound_exists = 0;
-    ws_flags.console_outbound_exists = 0;
-    ws_flags.console_outbound = NULL;
-    ws_flags.json_inbound = NULL;
-    ws_flags.json_outbound = NULL;
+    if (rb_init(&ws_flags.json_inbound, RB_SIZE) != 0) {
+        fprintf(stderr, "Failed to initialize JSON inbound queue\n");
+        return 1;
+    }
+    if (rb_init(&ws_flags.json_outbound, RB_SIZE) != 0) {
+        fprintf(stderr, "Failed to initialize JSON outbound queue\n");
+        return 1;
+    }
+    if (rb_init(&ws_flags.console_outbound, RB_SIZE) != 0) {
+        fprintf(stderr, "Failed to initialize console outbound queue\n");
+        return 1;
+    }
     ws_flags.close_code = 0;
 
     pthread_t wst;

@@ -11,26 +11,26 @@
 #include "utils.h"
 
 //get event and shi idk
-void get_event(ws_thread_flags_t *flags) {
-    char *json_text = atomic_exchange(&flags->json_inbound, NULL);
+void get_event(ws_thread_ctx_t *ctx) {
+    char *json_text = rb_dequeue(&ctx->json_inbound);
     if (!json_text) {
-        atomic_store(&flags->json_inbound_exists, 0);
         return;
     }
+
     cJSON *root = cJSON_Parse(json_text);
     if (!root) {
-        atomic_store(&flags->json_inbound_exists, 0);
+        free(json_text);
         return;
     }
-    push_console_outbound(flags, json_text);
-    atomic_store(&flags->json_inbound_exists, 0);
+
+    push_console_outbound(ctx, json_text);
+
     free(json_text);
     cJSON_Delete(root);
-    return;
 }
 
 void* get_event_thread(void *flagsv){
-    ws_thread_flags_t *flags = flagsv;
+    ws_thread_ctx_t *flags = flagsv;
 
     while (atomic_load(&flags->running)){
         get_event(flags);

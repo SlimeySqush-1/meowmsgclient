@@ -354,7 +354,7 @@ int ws_send_text(int sock, const char* msg) {
     free(frame);
     return (int)total_sent;
 }
-int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_flags_t *flags) {
+int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags) {
     size_t n;
     int rc;
     (void)flags;
@@ -566,15 +566,14 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
     }
 }
 
-void push_json(ws_thread_flags_t *flags, char *json) {
+void push_json(ws_thread_ctx_t *ctx, char *json) {
     if (!json) return;
 
-    char *old = atomic_exchange(&flags->json_inbound, json);
-    atomic_store(&flags->json_inbound_exists, true);
-    if (old) {free(old); old = NULL;}
+    if (rb_enqueue(&ctx->json_inbound, json) != 0) {
+        free(json);
+    }
 }
-
-int pre_ws_loop(ws_thread_flags_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
+int pre_ws_loop(ws_thread_ctx_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
     int sock = flags->sock;
     (void)ws_recv_ctx;
 
@@ -638,7 +637,7 @@ int ws_send_close(int sock, uint16_t code) {
 
 
 void* websocket_thread(void *ctx) {
-    ws_thread_flags_t *flags = (ws_thread_flags_t*)ctx;
+    ws_thread_ctx_t *flags = (ws_thread_ctx_t*)ctx;
     int sock = flags->sock;
     ws_recv_ctx_t ws_recv_ctx = {0};
     ws_reset(&ws_recv_ctx);
@@ -682,11 +681,11 @@ void* websocket_thread(void *ctx) {
 
                 switch (rc) {
                     case WS_OK:
-                        if (msg && !atomic_load(&flags->json_inbound_exists)) {
-                            push_json(flags, (char*)msg);
-                        } else if (msg) {
-                            printf("[WS] mailbox full, skipping\n");
-                            free(msg);
+                        if (msg) {
+                            if (rb_enqueue(&flags->json_inbound, (char*)msg) != 0) {
+                                printf("[WS] inbound queue full, dropping\n");
+                                free(msg);
+                            }
                         }
                         break;
 
@@ -715,13 +714,10 @@ void* websocket_thread(void *ctx) {
                 }
             }
         }
-        if (atomic_load(&flags->json_outbound_exists)) {
-            char *json = atomic_exchange(&flags->json_outbound, NULL);
-            if (json) {
-                ws_send_text(sock, json);
-                free(json);
-            }
-            atomic_store(&flags->json_outbound_exists, false);
+        char *json;
+        while ((json = rb_dequeue(&flags->json_outbound)) != NULL) {
+            ws_send_text(sock, json);
+            free(json);
         }
     }
 

@@ -63,7 +63,7 @@ typedef struct {
 
 ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handshake_t *hs);
 int ws_send_text(int sock, const char* msg);
-int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_flags_t *flags);
+int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags);
 void ws_reset(ws_recv_ctx_t *ctx);
 void* websocket_thread(void *ctx);
 

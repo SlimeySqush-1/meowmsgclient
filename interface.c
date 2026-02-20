@@ -39,28 +39,28 @@ char *format_msg(const char *channel, const char *message) {
     return result;
 }
 
-void push_json_outbound(ws_thread_flags_t *flags, const char *json) {
-    size_t len = strlen(json) + 1;
-    char *buffer = malloc(len);
-    if (!buffer) return;
-    memcpy(buffer, json, len);
+void push_json_outbound(ws_thread_ctx_t *ctx, const char *json)
+{
+    if (!json) return;
 
-    char *old = atomic_exchange(&flags->json_outbound, buffer);
-    atomic_store(&flags->json_outbound_exists, true);
-    if (old) free(old);
-}
+    char *copy = strdup(json);
+    if (!copy) return;
 
-void push_message(char *chn, char *msg, ws_thread_flags_t *flags) {
-    if (msg && !atomic_load(&flags->json_outbound_exists)) {
-        char *json = format_msg(chn, msg);
-        if (!json) return;
-        push_json_outbound(flags, json);
-        free(json);
-    } else if (msg) {
-        printf("[IF] mailbox full, skipping\n");
+    if (rb_enqueue(&ctx->json_outbound, copy) != 0) {
+        printf("[IF] outbound queue full, dropping\n");
+        free(copy);
     }
 }
+void push_message(char *chn, char *msg, ws_thread_ctx_t *ctx)
+{
+    if (!msg) return;
 
+    char *json = format_msg(chn, msg);
+    if (!json) return;
+
+    push_json_outbound(ctx, json);
+    free(json);
+}
 void inject_input(const char *input, char input_buffer[MAX_INPUT], int *input_ptr) {
     size_t len = strlen(input);
 
@@ -89,7 +89,7 @@ void history_add(char history[HISTORY_SIZE][MAX_INPUT],
 
 
 void* interface(void *ctx) {
-    ws_thread_flags_t *flags = (ws_thread_flags_t *)ctx;
+    ws_thread_ctx_t *flags = (ws_thread_ctx_t *)ctx;
     WINDOW *msg_win, *input_win;
     int height, width;
 
@@ -121,15 +121,12 @@ void* interface(void *ctx) {
 
 
     while (atomic_load(&flags->running)) {
-        if (atomic_load(&flags->console_outbound_exists)) {
-            char *msg = atomic_exchange(&flags->console_outbound, NULL);
-            if (msg != NULL) {
-                wprintw(msg_win, "remote: %s\n", msg);
-                free(msg);
-                atomic_store(&flags->console_outbound_exists, false);
-                wrefresh(msg_win);
-            }
+        char *msg;
+        while ((msg = rb_dequeue(&flags->console_outbound)) != NULL) {
+            wprintw(msg_win, "remote: %s\n", msg);
+            free(msg);
         }
+        wrefresh(msg_win);
 
         int ch = wgetch(input_win);
 
@@ -142,12 +139,17 @@ void* interface(void *ctx) {
                     if (input_buffer[0] == '/') {
                         if (strcmp(input_buffer, "/quit") == 0) {
                             atomic_store(&flags->running, false);
-                        } else if (strncmp(input_buffer, "/sendraw ", 9) == 0){
-                            char *raw_message = malloc(MAX_INPUT);
-                            strncpy(raw_message, input_buffer + 9, MAX_INPUT - 9);
-                            push_json_outbound(flags, raw_message);
-                            wprintw(msg_win, "you (raw): %s\n", raw_message); //rawr
-                            free(raw_message);
+                        } else if (strncmp(input_buffer, "/sendraw ", 9) == 0){char *raw_message = strdup(input_buffer + 9);
+                        if (!raw_message) {
+                            wprintw(msg_win, "allocation failed\n");
+                        } else {
+                            if (rb_enqueue(&flags->json_outbound, raw_message) != 0) {
+                                wprintw(msg_win, "queue full, dropping\n");
+                                free(raw_message);
+                            } else {
+                                wprintw(msg_win, "you (raw): %s\n", input_buffer + 9);
+                            }
+                        }
                         } else if (strncmp(input_buffer, "/join ", 6) == 0) {
                             strncpy(current_channel, input_buffer + 6, MAX_CHANNEL_NAME - 1);
                             wprintw(msg_win, "Switched to: %s\n", current_channel);
@@ -157,6 +159,12 @@ void* interface(void *ctx) {
                             wprintw(msg_win, "/sendraw <message> - Send a raw message\n");
                             wprintw(msg_win, "/join <channel> - Join a channel\n");
                             wprintw(msg_win, "/help - Display this help message\n");
+                        } else if (strncmp(input_buffer, "/stress", 7) == 0) {
+                            wprintw(msg_win, "stress\n"); //experimental??
+                            for (int i = 0; i < 100; i++) {
+                                push_message(current_channel, "Stress test message", flags);
+                                sleep_ms(20);
+                            }
                         }
                     } else {
                         push_message(current_channel, input_buffer, flags);
