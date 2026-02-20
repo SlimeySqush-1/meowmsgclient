@@ -66,8 +66,11 @@ int main(void) {
     pthread_join(wst, NULL);
     pthread_join(json_thread, NULL);
     pthread_join(interfacet, NULL);
-
+    //printf("Exiting...\n");
     curl_global_cleanup();
+    rb_destroy(&ws_flags.console_outbound);
+    rb_destroy(&ws_flags.json_inbound);
+    rb_destroy(&ws_flags.json_outbound);
     //tls_cleanup(ctx, ssl);
     close(sock);
     return 0;

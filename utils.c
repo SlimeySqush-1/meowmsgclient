@@ -28,6 +28,12 @@ int rb_init(ws_queue_t *queue, size_t capacity) {
 }
 
 void rb_destroy(ws_queue_t *queue) {
+    void *item;
+
+    while ((item = rb_dequeue(queue)) != NULL) {
+        free(item);
+    }
+
     pthread_mutex_destroy(&queue->lock);
     free(queue->message);
 }

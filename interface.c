@@ -161,9 +161,9 @@ void* interface(void *ctx) {
                             wprintw(msg_win, "/help - Display this help message\n");
                         } else if (strncmp(input_buffer, "/stress", 7) == 0) {
                             wprintw(msg_win, "stress\n"); //experimental??
-                            for (int i = 0; i < 100; i++) {
+                            for (int i = 0; i < 8192; i++) {
                                 push_message(current_channel, "Stress test message", flags);
-                                sleep_ms(20);
+                                sleep_ms(1);
                             }
                         }
                     } else {
