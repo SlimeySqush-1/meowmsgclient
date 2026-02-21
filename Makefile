@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -g -Wall -Wextra -Werror -pedantic -std=c23
-CFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -fsanitize=address -fno-omit-frame-pointer -g
+CFLAGS += -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -fsanitize=address -fno-omit-frame-pointer
 
 LDLIBS = -lcrypto -lcurl -lcjson -lncurses -lssl -lcrypto
 
