@@ -61,9 +61,14 @@ typedef struct {
     bool fin;
 } ws_recv_ctx_t;
 
-ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handshake_t *hs);
-int ws_send_text(int sock, const char* msg);
-int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags);
+int tcp_read(void *ctx, void *buf, size_t len, size_t *out);
+int tls_read(void *ctx, void *buf, size_t len, size_t *out);
+int tcp_write(void *ctx, const void *buf, size_t len);
+int tls_write(void *ctx, const void *buf, size_t len);
+
+ws_hs_rc_t ws_handshake(ws_io_t *io, const char *host, const char *path, ws_handshake_t *hs);
+int ws_send_text(ws_io_t *io, const char* msg);
+int ws_recv_step(ws_io_t *io, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags);
 void ws_reset(ws_recv_ctx_t *ctx);
 void* websocket_thread(void *ctx);
 

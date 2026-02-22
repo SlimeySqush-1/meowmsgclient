@@ -6,7 +6,6 @@
 #include <cjson/cJSON.h>
 #include <stdlib.h>
 
-#define MAX_INPUT 256
 #define MAX_CHANNEL_NAME 21
 #define HISTORY_SIZE 50
 

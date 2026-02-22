@@ -1,5 +1,6 @@
 #include "ws.h"
 #include "utils.h"
+#include <openssl/ssl3.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +14,9 @@
 #include <openssl/sha.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <openssl/ssl.h>
 
+#define MAX_EVENTS 4
 #define MAX_WS_PAYLOAD 16777216
 #define WS_OPCODE_CONTINUATION 0x0
 #define WS_OPCODE_TEXT 0x1
@@ -35,6 +38,119 @@ enum {
 #define WS_ERROR -2
 #define WS_NORMAL_CLOSE 1000
 #define WS_PAYLOAD_TOO_BIG 1009
+
+int tcp_read(void *ctx, void *buf, size_t len, size_t *out) {
+    int sock = *(int*)ctx;
+
+    ssize_t n = recv(sock, buf, len, 0);
+    if (n > 0) {
+        *out = (size_t)n;
+        return WS_OK;
+    }
+
+    if (n == 0)
+        return WS_CLOSED;
+
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return WS_AGAIN;
+
+    return WS_ERROR;
+}
+
+int tcp_write(void *ctx, const void *buf, size_t len) {
+    int sock = *(int*)ctx;
+
+    ssize_t n = send(sock, buf, len, 0);
+    if (n >= 0)
+        return (int)n;
+
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return WS_AGAIN;
+
+    return WS_ERROR;
+}
+
+int tls_read(void *ctx, void *buf, size_t len, size_t *out) {
+    SSL *ssl = (SSL*)ctx;
+
+    int n = SSL_read(ssl, buf, len);
+    if (n > 0) {
+        *out = (size_t)n;
+        return WS_OK;
+    }
+
+    int err = SSL_get_error(ssl, n);
+
+    if (err == SSL_ERROR_WANT_READ ||
+        err == SSL_ERROR_WANT_WRITE)
+        return WS_AGAIN;
+
+    if (err == SSL_ERROR_ZERO_RETURN)
+        return WS_CLOSED;
+
+    return WS_ERROR;
+}
+
+int tls_write(void *ctx, const void *buf, size_t len) {
+    SSL *ssl = (SSL*)ctx;
+
+    int n = SSL_write(ssl, buf, len);
+    if (n > 0)
+        return n;
+
+    int err = SSL_get_error(ssl, n);
+
+    if (err == SSL_ERROR_WANT_READ ||
+        err == SSL_ERROR_WANT_WRITE)
+        return WS_AGAIN;
+
+    return WS_ERROR;
+}
+
+uint8_t *build_frame(const char *msg, size_t *out_len)
+{
+    size_t payload_len = strlen(msg);
+
+    size_t header_len = 2;
+
+    if (payload_len >= 126 && payload_len <= 65535) {
+        header_len += 2;
+    } else if (payload_len > 65535) {
+        header_len += 8;
+    }
+
+    size_t total_len = header_len + payload_len;
+
+    uint8_t *frame = malloc(total_len);
+    if (!frame)
+        return NULL;
+
+    size_t offset = 0;
+
+    frame[offset++] = 0x81;
+
+    if (payload_len < 126) {
+        frame[offset++] = (uint8_t)payload_len;
+
+    } else if (payload_len <= 65535) {
+        frame[offset++] = 126;
+        frame[offset++] = (payload_len >> 8) & 0xFF;
+        frame[offset++] = payload_len & 0xFF;
+
+    } else {
+        frame[offset++] = 127;
+
+        for (int i = 7; i >= 0; i--) {
+            frame[offset++] = (payload_len >> (i * 8)) & 0xFF;
+        }
+    }
+
+    memcpy(frame + offset, msg, payload_len);
+
+    *out_len = total_len;
+
+    return frame;
+}
 
 int ascii_strncasecmp(const char *a, const char *b, size_t n) {
     for (size_t i = 0; i < n; i++) {
@@ -137,28 +253,13 @@ void ws_quit(ws_recv_ctx_t *ctx) {
     ws_reset(ctx);
 }
 
-// Replaces ssl_read_some. Returns WS_OK, WS_AGAIN, WS_CLOSED, or WS_ERROR.
-static int sock_read_some(int sock, void *buf, size_t len, size_t *out) {
-    ssize_t n = recv(sock, buf, len, 0);
-
-    if (n > 0) {
-        *out = (size_t)n;
-        return WS_OK;
-    }
-    if (n == 0) return WS_CLOSED;
-
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-        return WS_AGAIN;
-
-    return WS_ERROR;
-}
 
 static void mask_payload(unsigned char *data, size_t len, unsigned char mask[4]) {
     for (size_t i = 0; i < len; i++)
         data[i] ^= mask[i % 4];
 }
 
-ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handshake_t *hs) {
+ws_hs_rc_t ws_handshake(ws_io_t *io, const char *host, const char *path, ws_handshake_t *hs) {
     if (!hs) {
         perror("ws_handshake: NULL handshake");
         return WS_HS_ERROR;
@@ -195,18 +296,21 @@ ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handsha
 
     // Write request to socket
     while (hs->woff < hs->req_len) {
-        ssize_t n = send(sock, hs->req + hs->woff, hs->req_len - hs->woff, 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return WS_HS_AGAIN;
+        int n = io->write(io->ctx, hs->req + hs->woff, hs->req_len - hs->woff);
+
+        if (n == WS_AGAIN)
+            return WS_HS_AGAIN;
+
+        if (n <= 0)
             return WS_HS_ERROR;
-        }
+
         hs->woff += n;
     }
 
     // Read response from socket
     while (hs->roff + 1 < sizeof(hs->resp)) {
         size_t n;
-        int rc = sock_read_some(sock, hs->resp + hs->roff, sizeof(hs->resp) - hs->roff - 1, &n);
+        int rc = io->read(io->ctx, hs->resp + hs->roff, sizeof(hs->resp) - hs->roff - 1, &n);
         if (rc == WS_AGAIN) return WS_HS_AGAIN;
         if (rc != WS_OK) return WS_HS_ERROR;
 
@@ -256,7 +360,7 @@ ws_hs_rc_t ws_handshake(int sock, const char *host, const char *path, ws_handsha
     return WS_HS_ERROR;
 }
 
-int ws_send_pong(int sock, const uint8_t *payload, size_t len) {
+int ws_send_pong(ws_io_t *io, const uint8_t *payload, size_t len) {
     unsigned char header[14];
     unsigned char mask[4];
     size_t head_len = 0;
@@ -290,13 +394,16 @@ int ws_send_pong(int sock, const uint8_t *payload, size_t len) {
 
     size_t sent = 0;
     while (sent < total_len) {
-        ssize_t n = send(sock, frame + sent, total_len - sent, 0);
+        int n = io->write(io->ctx, frame + sent, total_len - sent);
+
         if (n > 0) {
             sent += n;
-        } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+        } else if (n == WS_AGAIN) {
             free(frame);
-            return -1;
+            return WS_AGAIN;
+        } else {
+            free(frame);
+            return WS_ERROR;
         }
         sleep_ms(1);
     }
@@ -306,7 +413,7 @@ int ws_send_pong(int sock, const uint8_t *payload, size_t len) {
 }
 
 
-int ws_send_text(int sock, const char* msg) {
+int ws_send_text(ws_io_t *io, const char* msg) {
     size_t len = strlen(msg);
     unsigned char header[14];
     unsigned char mask[4];
@@ -337,31 +444,30 @@ int ws_send_text(int sock, const char* msg) {
 
     size_t total_sent = 0;
     while (total_sent < total_len) {
-        ssize_t n = send(sock, frame + total_sent, total_len - total_sent, 0);
+        int n = io->write(io->ctx, frame + total_sent, total_len - total_sent);
+
         if (n > 0) {
             total_sent += n;
-        } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                sleep_ms(1);
-                continue;
-            }
-            perror("send failed");
+        } else if (n == WS_AGAIN) {
             free(frame);
-            return -1;
+            return WS_AGAIN;
+        } else {
+            free(frame);
+            return WS_ERROR;
         }
     }
 
     free(frame);
     return (int)total_sent;
 }
-int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags) {
+int ws_recv_step(ws_io_t *io, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags) {
     size_t n;
     int rc;
     (void)flags;
     while (1) {
         switch (ctx->phase) {
             case WS_RECV_HDR:
-                rc = sock_read_some(sock, ctx->hdr + ctx->hdr_off, 2 - ctx->hdr_off, &n);
+                rc = io->read(io->ctx, ctx->hdr + ctx->hdr_off, 2 - ctx->hdr_off, &n);
                 if (rc != WS_OK) return rc;
                 ctx->hdr_off += n;
                 if (ctx->hdr_off < 2) return WS_AGAIN;
@@ -418,7 +524,7 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
                 break;
 
             case WS_RECV_EXT_LEN:
-                rc = sock_read_some(sock, ctx->ext + ctx->ext_off, ctx->ext_len - ctx->ext_off, &n);
+                rc = io->read(io->ctx, ctx->ext + ctx->ext_off, ctx->ext_len - ctx->ext_off, &n);
                 if (rc != WS_OK) return rc;
                 ctx->ext_off += n;
 
@@ -441,7 +547,7 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
                 break;
 
             case WS_RECV_MASK:
-                rc = sock_read_some(sock, ctx->mask + ctx->mask_off, 4 - ctx->mask_off, &n);
+                rc = io->read(io->ctx, ctx->mask + ctx->mask_off, 4 - ctx->mask_off, &n);
                 if (rc != WS_OK) return rc;
                 ctx->mask_off += n;
 
@@ -458,7 +564,7 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
                         return WS_ERROR;
                     }
                 }
-                rc = sock_read_some(sock, ctx->payload + ctx->payload_off, ctx->payload_len - ctx->payload_off, &n);
+                rc = io->read(io->ctx, ctx->payload + ctx->payload_off, ctx->payload_len - ctx->payload_off, &n);
                 if (rc == WS_AGAIN) return WS_AGAIN;
                 if (rc != WS_OK) {
                     ws_quit(ctx);
@@ -478,7 +584,7 @@ int ws_recv_step(int sock, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, w
 
                 if (ctx->opcode == 0x08) {ws_quit(ctx); return WS_NORMAL_CLOSE;}
                 if (ctx->opcode == WS_OPCODE_PING) {
-                    ws_send_pong(sock, ctx->payload, ctx->payload_len);
+                    ws_send_pong(io, ctx->payload, ctx->payload_len);
                     ws_quit(ctx);
                     return WS_AGAIN;
                 }
@@ -575,13 +681,14 @@ void push_json(ws_thread_ctx_t *ctx, char *json) {
 }
 int pre_ws_loop(ws_thread_ctx_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
     int sock = flags->sock;
+    (void)sock;
     (void)ws_recv_ctx;
-
+    ws_io_t *io = &flags->io;
     char identify[64];
     snprintf(identify, sizeof(identify), "{\"user\": %d}", 1234);
 
     ///printf("[WS] sending auth: %s\n", identify);
-    if (ws_send_text(sock, identify) <= 0) {
+    if (ws_send_text(io, identify) <= 0) {
         //fprintf(stderr, "[WS] failed to send auth \n");
         return -1;
     }
@@ -591,7 +698,7 @@ int pre_ws_loop(ws_thread_ctx_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
     return 0;
 }
 
-int ws_send_close(int sock, uint16_t code) {
+int ws_send_close(ws_io_t *io, uint16_t code) {
     uint8_t header[14];
     uint8_t mask[4];
     size_t head_len = 0;
@@ -620,15 +727,14 @@ int ws_send_close(int sock, uint16_t code) {
     size_t sent = 0;
 
     while (sent < total_len) {
-        ssize_t n = send(sock, frame + sent, total_len - sent, 0);
+        int n = io->write(io->ctx, frame + sent, total_len - sent);
 
         if (n > 0) {
             sent += n;
-        } else if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue;
-            }
-            return -1;
+        } else if (n == WS_AGAIN) {
+            return WS_AGAIN;
+        } else {
+            return WS_ERROR;
         }
     }
 
@@ -638,9 +744,12 @@ int ws_send_close(int sock, uint16_t code) {
 
 void* websocket_thread(void *ctx) {
     ws_thread_ctx_t *flags = (ws_thread_ctx_t*)ctx;
-    int sock = flags->sock;
+    ws_io_t *io = &flags->io;
     ws_recv_ctx_t ws_recv_ctx = {0};
     ws_reset(&ws_recv_ctx);
+
+
+
     int epfd = epoll_create1(0);
     if (epfd == -1) {
         perror("epoll_create1");
@@ -650,9 +759,9 @@ void* websocket_thread(void *ctx) {
 
     struct epoll_event ev = {
         .events = EPOLLIN,
-        .data.fd = sock
+        .data.fd = io->sock
     };
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock, &ev) == -1) {
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, io->sock, &ev) == -1) {
         perror("epoll_ctl");
         close(epfd);
         return NULL;
@@ -666,58 +775,102 @@ void* websocket_thread(void *ctx) {
     struct epoll_event events[1];
 
     while (atomic_load(&flags->running)) {
-        uint8_t *msg = NULL;
-        size_t len = 0;
-        int n = epoll_wait(epfd, events, 1, 100);
-        if (n == -1) {
+
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+
+        if (nfds < 0) {
             perror("epoll_wait");
-            atomic_store(&flags->running, false);
             break;
         }
-        for (int i = 0; i < n; i++) {
-            int fd = events[i].data.fd;
-            if (fd == sock) {
-                int rc = ws_recv_step(sock, &ws_recv_ctx, &msg, &len, flags);
 
-                switch (rc) {
-                    case WS_OK:
-                        if (msg) {
-                            if (rb_enqueue(&flags->json_inbound, (char*)msg) != 0) {
-                                printf("[WS] inbound queue full, dropping\n");
-                                free(msg);
-                            }
-                        }
-                        break;
+        for (int i = 0; i < nfds; i++) {
 
-                    case WS_AGAIN:
-                        break;
+            uint32_t ev = events[i].events;
 
-                    case WS_CLOSED:
-                        printf("[WS] Connection closed by peer\n");
-                        atomic_store(&flags->running, false);
-                        break;
+            if (ev & EPOLLIN) {
 
-                    case WS_ERROR:
-                        fprintf(stderr, "[WS] Socket error: %s\n", strerror(errno));
-                        atomic_store(&flags->running, false);
-                        break;
+                uint8_t *msg = NULL;
+                size_t msg_len = 0;
 
-                    case WS_PAYLOAD_TOO_BIG:
-                        ws_send_close(sock, WS_PAYLOAD_TOO_BIG);
-                        atomic_store(&flags->running, false);
-                        break;
+                int rc = ws_recv_step(
+                    &flags->io,
+                    &ws_recv_ctx,
+                    &msg,
+                    &msg_len,
+                    flags
+                );
 
-                    case WS_NORMAL_CLOSE:
-                        ws_send_close(sock, WS_NORMAL_CLOSE);
-                        atomic_store(&flags->running, false);
-                        break;
+                if (rc == WS_ERROR || rc == WS_CLOSED) {
+                    goto cleanup;
+                }
+
+                if (!flags->want_write) {
+
+                    char *json = rb_dequeue(&flags->json_outbound);
+
+                    if (json) {
+
+                        flags->out_frame = build_frame(json, &flags->out_len);
+
+                        flags->out_sent = 0;
+                        flags->want_write = true;
+
+                        free(json);
+
+                        struct epoll_event mod = {
+                            .events = EPOLLIN | EPOLLOUT,
+                            .data.fd = flags->sock
+                        };
+
+                        epoll_ctl(epfd,
+                                  EPOLL_CTL_MOD,
+                                  flags->sock,
+                                  &mod);
+                    }
                 }
             }
-        }
-        char *json;
-        while ((json = rb_dequeue(&flags->json_outbound)) != NULL) {
-            ws_send_text(sock, json);
-            free(json);
+
+            if (ev & EPOLLOUT) {
+
+                if (flags->want_write) {
+
+                    int n = flags->io.write(
+                        flags->io.ctx,
+                        flags->out_frame + flags->out_sent,
+                        flags->out_len - flags->out_sent
+                    );
+
+                    if (n > 0) {
+
+                        flags->out_sent += n;
+
+                        if (flags->out_sent == flags->out_len) {
+
+                            free(flags->out_frame);
+                            flags->out_frame = NULL;
+                            flags->want_write = false;
+
+                            struct epoll_event mod = {
+                                .events = EPOLLIN,
+                                .data.fd = flags->sock
+                            };
+
+                            epoll_ctl(epfd,
+                                      EPOLL_CTL_MOD,
+                                      flags->sock,
+                                      &mod);
+                        }
+
+                    } else if (n == WS_AGAIN) {
+                    } else {
+                        goto cleanup;
+                    }
+                }
+            }
+
+            if (ev & (EPOLLERR | EPOLLHUP)) {
+                goto cleanup;
+            }
         }
     }
 

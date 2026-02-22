@@ -6,7 +6,10 @@
 
 int tcp_connect(const char* host, int port) {
     struct hostent *he = gethostbyname(host);
-    if (!he) return -1;
+    if (!he) {
+        herror("gethostbyname failed");
+        return -1;
+    }
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
