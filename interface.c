@@ -10,6 +10,20 @@
 #define MAX_CHANNEL_NAME 21
 #define HISTORY_SIZE 50
 
+static void gen_msg(char *buffer, size_t length) {
+    static const char charset[] =
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789";
+
+    size_t charset_size = sizeof(charset) - 1;
+
+    for (size_t i = 0; i < length; i++) {
+        buffer[i] = charset[rand() % charset_size];
+    }
+    buffer[length] = '\0';
+}
+
 char *format_msg(const char *channel, const char *message) {
     if (!channel || !message)
         return NULL;
@@ -159,17 +173,50 @@ void* interface(void *ctx) {
                             wprintw(msg_win, "/sendraw <message> - Send a raw message\n");
                             wprintw(msg_win, "/join <channel> - Join a channel\n");
                             wprintw(msg_win, "/help - Display this help message\n");
-                        } else if (strncmp(input_buffer, "/stress", 7) == 0) {
-                            wprintw(msg_win, "stress\n"); //experimental??
-                            for (int i = 0; i < 8192; i++) {
-                                push_message(current_channel, "Stress test message", flags);
+                        }
+                        else if (strncmp(input_buffer, "/stress", 7) == 0) {
+                            int count = 0;
+                            int length = 0;
+
+                            if (sscanf(input_buffer, "/stress %d %d", &count, &length) != 2) {
+                                wprintw(msg_win, "Usage: /stress <count> <length>\n");
+                                wrefresh(msg_win);
+                                break;
+                            }
+
+                            if (count <= 0 || length <= 0 || length > 4096) {
+                                wprintw(msg_win, "Invalid count or length.\n");
+                                wrefresh(msg_win);
+                                break;
+                            }
+
+                            wprintw(msg_win, "Starting stress test: %d messages, %d chars each\n", count, length);
+                            wrefresh(msg_win);
+
+                            srand((unsigned int)time(NULL));
+
+                            char *token = malloc(length + 1);
+                            if (!token) {
+                                wprintw(msg_win, "Memory allocation failed\n");
+                                wrefresh(msg_win);
+                                break;
+                            }
+
+                            for (int i = 0; i < count; i++) {
+                                gen_msg(token, length);
+                                push_message(current_channel, token, flags);
+
                                 sleep_ms(1);
+
                                 while ((msg = rb_dequeue(&flags->console_outbound)) != NULL) {
                                     wprintw(msg_win, "remote: %s\n", msg);
                                     free(msg);
                                 }
+
                                 wrefresh(msg_win);
                             }
+
+                            free(token);
                         }
                     } else {
                         push_message(current_channel, input_buffer, flags);

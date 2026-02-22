@@ -17,4 +17,9 @@ $(TARGET): $(OBJ)
 clean:
 	rm -f $(TARGET) $(OBJ)
 
+ASAN_OPTIONS=quarantine_size_mb=16:detect_leaks=1
+
+run: meowmsgclient
+	ASAN_OPTIONS=$(ASAN_OPTIONS) ./meowmsgclient
+
 .PHONY: all clean
