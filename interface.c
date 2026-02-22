@@ -164,6 +164,11 @@ void* interface(void *ctx) {
                             for (int i = 0; i < 8192; i++) {
                                 push_message(current_channel, "Stress test message", flags);
                                 sleep_ms(1);
+                                while ((msg = rb_dequeue(&flags->console_outbound)) != NULL) {
+                                    wprintw(msg_win, "remote: %s\n", msg);
+                                    free(msg);
+                                }
+                                wrefresh(msg_win);
                             }
                         }
                     } else {
