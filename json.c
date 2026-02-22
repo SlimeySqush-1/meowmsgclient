@@ -35,7 +35,7 @@ void* get_event_thread(void *flagsv){
     while (atomic_load(&flags->running)){
         get_event(flags);
 
-        sleep_ms(10);
+        sleep_ms(1);
     }
     return NULL;
 }
