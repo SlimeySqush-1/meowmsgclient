@@ -25,42 +25,33 @@ SSL_CTX* tls_init(void)
     return ctx;
 }
 
-SSL* tls_connect(SSL_CTX *ctx, int sock, const char *hostname)
-{
+SSL* tls_connect(SSL_CTX *ctx, int sock, const char *hostname) {
     SSL *ssl = SSL_new(ctx);
-    if (!ssl) {
-        ERR_print_errors_fp(stderr);
-        return NULL;
-    }
+    SSL_set_fd(ssl, sock);
+    SSL_set_tlsext_host_name(ssl, hostname);
+    SSL_set1_host(ssl, hostname);
 
-    if (SSL_set_fd(ssl, sock) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        return NULL;
-    }
+    while (1) {
+        int ret = SSL_connect(ssl);
 
-    if (SSL_set_tlsext_host_name(ssl, hostname) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        return NULL;
-    }
+        if (ret == 1)
+            break;
 
-    if (SSL_connect(ssl) != 1) {
-        ERR_print_errors_fp(stderr);
-        SSL_free(ssl);
-        return NULL;
-    }
+        int err = SSL_get_error(ssl, ret);
 
-    long verify = SSL_get_verify_result(ssl);
-    if (verify != X509_V_OK) {
-        fprintf(stderr, "Certificate verification failed: %ld\n", verify);
+        if (err == SSL_ERROR_WANT_READ ||
+            err == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+
+        fprintf(stderr, "SSL_connect fatal error: %d\n", err);
+        ERR_print_errors_fp(stderr);
         SSL_free(ssl);
         return NULL;
     }
 
     return ssl;
 }
-
 void tls_cleanup(SSL_CTX *ctx, SSL *ssl)
 {
     if (ssl) {

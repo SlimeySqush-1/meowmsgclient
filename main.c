@@ -12,7 +12,7 @@
 #include "interface.h"
 
 #define PORT 443
-#define HOST "echo.websocket.org"
+#define HOST "ws.ifelse.io"
 #define RB_SIZE 4096
 
 #include "utils.h"
@@ -44,15 +44,6 @@ int main(void) {
     io.write = tls_write;
     io.ctx = ssl;
 
-    if (ctx == NULL) {
-        fprintf(stderr, "Failed to initialize TLS context\n");
-        io.encrypted = false;
-        io.ctx = ctx;
-        return 1;
-    } else {
-        io.encrypted = true;
-        io.ctx = ctx;
-    }
 
     ws_handshake_t hs;
     memset(&hs, 0, sizeof(hs));
@@ -67,7 +58,6 @@ int main(void) {
             return 1;
         }
 
-        sleep(1); //why sleep? idek
     }
     printf("ws handshake done\n");
     ws_thread_ctx_t ws_flags;
