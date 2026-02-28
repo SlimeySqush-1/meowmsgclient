@@ -5,6 +5,7 @@
 #include <string.h>
 #include <cjson/cJSON.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define MAX_CHANNEL_NAME 21
 #define HISTORY_SIZE 50
@@ -165,6 +166,7 @@ void* interface(void *ctx) {
                         }
                         } else if (strncmp(input_buffer, "/join ", 6) == 0) {
                             strncpy(current_channel, input_buffer + 6, MAX_CHANNEL_NAME - 1);
+                            current_channel[MAX_CHANNEL_NAME - 1] = '\0';
                             wprintw(msg_win, "Switched to: %s\n", current_channel);
                         } else if (strncmp(input_buffer, "/help", 6)==0) {
                             wprintw(msg_win, "Available commands:\n");

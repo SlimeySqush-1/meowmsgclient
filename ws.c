@@ -677,14 +677,11 @@ int ws_send_close(ws_io_t *io, uint16_t code) {
     return 0;
 }
 
-
 void* websocket_thread(void *ctx) {
     ws_thread_ctx_t *flags = (ws_thread_ctx_t*)ctx;
     ws_io_t *io = &flags->io;
     ws_recv_ctx_t ws_recv_ctx = {0};
     ws_reset(&ws_recv_ctx);
-
-
 
     int epfd = epoll_create1(0);
     if (epfd == -1) {
@@ -692,145 +689,87 @@ void* websocket_thread(void *ctx) {
         return NULL;
     }
 
-
-    struct epoll_event ev = {
-        .events = EPOLLIN,
-        .data.fd = io->sock
-    };
+    struct epoll_event ev = {.events = EPOLLIN, .data.fd = io->sock};
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, io->sock, &ev) == -1) {
         perror("epoll_ctl");
         close(epfd);
         return NULL;
     }
 
-    if (pre_ws_loop(flags, &ws_recv_ctx) != 0) {
-        fprintf(stderr, "Failed pre-loop setup\n");
-        goto cleanup;
-    }
+    if (pre_ws_loop(flags, &ws_recv_ctx) != 0) goto cleanup;
 
-    struct epoll_event events[1];
+    struct epoll_event events[MAX_EVENTS];
 
     while (atomic_load(&flags->running)) {
+        if (!flags->want_write) {
+            char *json = rb_dequeue(&flags->json_outbound);
+            if (json) {
+                flags->out_frame = ws_build_frame(WS_OPCODE_TEXT, (uint8_t*)json, strlen(json), true, &flags->out_len);
+                flags->out_sent = 0;
+                flags->want_write = true;
+                free(json);
+
+                ev.events = EPOLLIN | EPOLLOUT;
+                epoll_ctl(epfd, EPOLL_CTL_MOD, io->sock, &ev);
+            }
+        }
+
         int nfds = epoll_wait(epfd, events, MAX_EVENTS, 100);
         if (nfds < 0) {
-            perror("epoll_wait");
+            if (errno == EINTR) continue;
             break;
         }
 
         for (int i = 0; i < nfds; i++) {
+            uint32_t revents = events[i].events;
 
-            uint32_t ev = events[i].events;
+            if (revents & (EPOLLERR | EPOLLHUP)) goto cleanup;
 
-            if (ev & EPOLLIN) {
-
+            if (revents & EPOLLIN) {
                 uint8_t *msg = NULL;
                 size_t msg_len = 0;
+                int rc = ws_recv_step(io, &ws_recv_ctx, &msg, &msg_len, flags);
 
-                int rc = ws_recv_step(
-                    &flags->io,
-                    &ws_recv_ctx,
-                    &msg,
-                    &msg_len,
-                    flags
-                );
                 if (rc == WS_NORMAL_CLOSE) {
-                    ws_send_close(&flags->io, WS_NORMAL_CLOSE);
+                    ws_send_close(io, WS_NORMAL_CLOSE);
                     goto cleanup;
                 }
-                if (rc == WS_ERROR || rc == WS_CLOSED) {
-                    goto cleanup;
-                }
-                if (msg) {
-                    push_json(ctx, (char *)msg);
-                }
-
-                if (!flags->want_write) {
-
-                    char *json = rb_dequeue(&flags->json_outbound);
-
-                    if (json) {
-
-                        flags->out_frame = ws_build_frame(
-                            WS_OPCODE_TEXT,
-                            (uint8_t*)json,
-                            strlen(json),
-                            true,
-                            &flags->out_len
-                        );
-
-                        flags->out_sent = 0;
-                        flags->want_write = true;
-
-                        free(json);
-
-                        struct epoll_event mod = {
-                            .events = EPOLLIN | EPOLLOUT,
-                            .data.fd = flags->io.sock
-                        };
-
-                        epoll_ctl(epfd,
-                                  EPOLL_CTL_MOD,
-                                  flags->io.sock,
-                                  &mod);
-                    }
-                }
+                if (rc == WS_ERROR || rc == WS_CLOSED) goto cleanup;
+                if (msg) push_json(ctx, (char *)msg);
             }
 
-            if (ev & EPOLLOUT) {
+            if ((revents & EPOLLOUT) && flags->want_write) {
+                int n = io->write(io->ctx, flags->out_frame + flags->out_sent, flags->out_len - flags->out_sent);
 
-                if (flags->want_write) {
+                if (n > 0) {
+                    flags->out_sent += n;
+                    if (flags->out_sent == flags->out_len) {
+                        free(flags->out_frame);
+                        flags->out_frame = NULL;
+                        flags->want_write = false;
 
-                    int n = flags->io.write(
-                        flags->io.ctx,
-                        flags->out_frame + flags->out_sent,
-                        flags->out_len - flags->out_sent
-                    );
-
-                    if (n > 0) {
-
-                        flags->out_sent += n;
-
-                        if (flags->out_sent == flags->out_len) {
-
-                            free(flags->out_frame);
-                            flags->out_frame = NULL;
-                            flags->want_write = false;
-
-                            struct epoll_event mod = {
-                                .events = EPOLLIN,
-                                .data.fd = flags->io.sock
-                            };
-
-                            epoll_ctl(epfd,
-                                      EPOLL_CTL_MOD,
-                                      flags->io.sock,
-                                      &mod);
+                        char *next_json = rb_dequeue(&flags->json_outbound);
+                        if (next_json) {
+                            flags->out_frame = ws_build_frame(WS_OPCODE_TEXT, (uint8_t*)next_json, strlen(next_json), true, &flags->out_len);
+                            flags->out_sent = 0;
+                            flags->want_write = true;
+                            free(next_json);
+                        } else {
+                            ev.events = EPOLLIN;
+                            epoll_ctl(epfd, EPOLL_CTL_MOD, io->sock, &ev);
                         }
-
-                    } else if (n == WS_AGAIN) {
-                    } else {
-                        goto cleanup;
                     }
+                } else if (n != WS_AGAIN) {
+                    goto cleanup;
                 }
-            }
-
-            if (ev & (EPOLLERR | EPOLLHUP)) {
-                goto cleanup;
             }
         }
     }
 
-
-    cleanup:
-        //printf("[WS] Thread exiting...\n");
-        if (flags->out_frame) {
-            free(flags->out_frame);
-            flags->out_frame = NULL;
-        }
-        ws_quit(&ws_recv_ctx);
-        ws_clear_message(&ws_recv_ctx);
-        if (epfd != -1)
-            close(epfd);
-        atomic_store(&flags->running, false);
-        return NULL;
+cleanup:
+    if (flags->out_frame) free(flags->out_frame);
+    ws_quit(&ws_recv_ctx);
+    if (epfd != -1) close(epfd);
+    atomic_store(&flags->running, false);
+    return NULL;
 }
