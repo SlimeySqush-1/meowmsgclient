@@ -711,7 +711,7 @@ void* websocket_thread(void *ctx) {
     struct epoll_event events[1];
 
     while (atomic_load(&flags->running)) {
-        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, 100);
         if (nfds < 0) {
             perror("epoll_wait");
             break;

@@ -22,7 +22,6 @@ void get_event(ws_thread_ctx_t *ctx) {
         free(json_text);
         return;
     }
-
     push_console_outbound(ctx, json_text);
 
     free(json_text);
