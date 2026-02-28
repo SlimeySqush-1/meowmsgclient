@@ -126,8 +126,8 @@ void* interface(void *ctx) {
 
 
     char history[HISTORY_SIZE][MAX_INPUT];
-    int history_count = 0;        // total stored
-    int history_index = -1;       // navigation position
+    int history_count = 0;
+    int history_index = -1;
     char draft_buffer[MAX_INPUT];
     int draft_len = 0;
     (void)draft_len;

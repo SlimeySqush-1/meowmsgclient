@@ -107,48 +107,69 @@ int tls_write(void *ctx, const void *buf, size_t len) {
     return WS_ERROR;
 }
 
-uint8_t *build_frame(const char *msg, size_t *out_len)
-{
-    size_t payload_len = strlen(msg);
+static void mask_payload(unsigned char *data, size_t len, unsigned char mask[4]) {
+    for (size_t i = 0; i < len; i++)
+        data[i] ^= mask[i % 4];
+}
 
+
+uint8_t *ws_build_frame(
+    uint8_t opcode,
+    const uint8_t *payload,
+    size_t len,
+    bool mask,
+    size_t *out_len
+) {
     size_t header_len = 2;
 
-    if (payload_len >= 126 && payload_len <= 65535) {
+    if (len >= 126 && len <= 65535)
         header_len += 2;
-    } else if (payload_len > 65535) {
+    else if (len > 65535)
         header_len += 8;
-    }
 
-    size_t total_len = header_len + payload_len;
+    if (mask)
+        header_len += 4;
+
+    size_t total_len = header_len + len;
 
     uint8_t *frame = malloc(total_len);
-    if (!frame)
-        return NULL;
+    if (!frame) return NULL;
 
     size_t offset = 0;
 
-    frame[offset++] = 0x81;
+    frame[offset++] = 0x80 | (opcode & 0x0F);
 
-    if (payload_len < 126) {
-        frame[offset++] = (uint8_t)payload_len;
-
-    } else if (payload_len <= 65535) {
-        frame[offset++] = 126;
-        frame[offset++] = (payload_len >> 8) & 0xFF;
-        frame[offset++] = payload_len & 0xFF;
-
+    if (len <= 125) {
+        frame[offset++] = (mask ? 0x80 : 0x00) | (uint8_t)len;
+    } else if (len <= 65535) {
+        frame[offset++] = (mask ? 0x80 : 0x00) | 126;
+        frame[offset++] = (len >> 8) & 0xFF;
+        frame[offset++] = len & 0xFF;
     } else {
-        frame[offset++] = 127;
-
-        for (int i = 7; i >= 0; i--) {
-            frame[offset++] = (payload_len >> (i * 8)) & 0xFF;
-        }
+        frame[offset++] = (mask ? 0x80 : 0x00) | 127;
+        for (int i = 7; i >= 0; i--)
+            frame[offset++] = (len >> (i * 8)) & 0xFF;
     }
 
-    memcpy(frame + offset, msg, payload_len);
+    uint8_t masking_key[4];
+
+    if (mask) {
+        if (getrandom(masking_key, 4, 0) != 4) {
+            free(frame);
+            return NULL;
+        }
+
+        memcpy(frame + offset, masking_key, 4);
+        offset += 4;
+    }
+
+    memcpy(frame + offset, payload, len);
+
+    if (mask) {
+        mask_payload(frame + offset, len, masking_key);
+    }
 
     *out_len = total_len;
-
     return frame;
 }
 
@@ -189,6 +210,8 @@ static int append_to_message(ws_recv_ctx_t *ctx,
         return WS_PAYLOAD_TOO_BIG;
 
     if (needed > ctx->message_cap) {
+        if (needed > SIZE_MAX / 2)
+            return WS_ERROR;
         size_t new_cap = needed * 2;
         uint8_t *tmp = realloc(ctx->message_buf, new_cap);
         if (!tmp) return WS_ERROR;
@@ -254,10 +277,6 @@ void ws_quit(ws_recv_ctx_t *ctx) {
 }
 
 
-static void mask_payload(unsigned char *data, size_t len, unsigned char mask[4]) {
-    for (size_t i = 0; i < len; i++)
-        data[i] ^= mask[i % 4];
-}
 
 ws_hs_rc_t ws_handshake(ws_io_t *io, const char *host, const char *path, ws_handshake_t *hs) {
     if (!hs) {
@@ -361,36 +380,8 @@ ws_hs_rc_t ws_handshake(ws_io_t *io, const char *host, const char *path, ws_hand
 }
 
 int ws_send_pong(ws_io_t *io, const uint8_t *payload, size_t len) {
-    unsigned char header[14];
-    unsigned char mask[4];
-    size_t head_len = 0;
-
-    if (getrandom(mask, 4, 0) != 4) return -1;
-
-    header[head_len++] = 0x8A;
-
-    if (len <= 125) {
-        header[head_len++] = 0x80 | (unsigned char)len;
-    } else if (len <= 0xFFFF) {
-        header[head_len++] = 0x80 | 126;
-        header[head_len++] = (len >> 8) & 0xFF;
-        header[head_len++] = len & 0xFF;
-    } else {
-        header[head_len++] = 0x80 | 127;
-        for (int i = 7; i >= 0; i--)
-            header[head_len++] = (len >> (i * 8)) & 0xFF;
-    }
-
-    memcpy(header + head_len, mask, 4);
-    head_len += 4;
-
-    size_t total_len = head_len + len;
-    unsigned char *frame = malloc(total_len);
-    if (!frame) return -1;
-
-    memcpy(frame, header, head_len);
-    memcpy(frame + head_len, payload, len);
-    mask_payload(frame + head_len, len, mask);
+    size_t total_len = 0;
+    uint8_t *frame = ws_build_frame(WS_OPCODE_PONG, payload, len, true, &total_len);
 
     size_t sent = 0;
     while (sent < total_len) {
@@ -405,7 +396,6 @@ int ws_send_pong(ws_io_t *io, const uint8_t *payload, size_t len) {
             free(frame);
             return WS_ERROR;
         }
-        sleep_ms(1);
     }
 
     free(frame);
@@ -413,53 +403,22 @@ int ws_send_pong(ws_io_t *io, const uint8_t *payload, size_t len) {
 }
 
 
-int ws_send_text(ws_io_t *io, const char* msg) {
-    size_t len = strlen(msg);
-    unsigned char header[14];
-    unsigned char mask[4];
-    size_t head_len = 0;
+int ws_send_text(ws_io_t *io, const char *msg) {
+    size_t len;
+    uint8_t *frame = ws_build_frame(
+        WS_OPCODE_TEXT,
+        (const uint8_t*)msg,
+        strlen(msg),
+        true,
+        &len
+    );
+    if (!frame) return WS_ERROR;
 
-    if (getrandom(mask, 4, 0) != 4) return -1;
-
-    header[head_len++] = 0x81;
-    if (len <= 125) {
-        header[head_len++] = 0x80 | (unsigned char)len;
-    } else if (len <= 0xFFFF) {
-        header[head_len++] = 0x80 | 126;
-        header[head_len++] = (len >> 8) & 0xFF;
-        header[head_len++] = len & 0xFF;
-    } else {
-        header[head_len++] = 0x80 | 127;
-        for (int i=7; i>=0; i--) header[head_len++] = (len >> (i*8)) & 0xFF;
-    }
-    memcpy(header + head_len, mask, 4);
-    head_len += 4;
-
-    size_t total_len = head_len + len;
-    unsigned char *frame = malloc(total_len);
-    if (!frame) return -1;
-    memcpy(frame, header, head_len);
-    memcpy(frame + head_len, msg, len);
-    mask_payload(frame + head_len, len, mask);
-
-    size_t total_sent = 0;
-    while (total_sent < total_len) {
-        int n = io->write(io->ctx, frame + total_sent, total_len - total_sent);
-
-        if (n > 0) {
-            total_sent += n;
-        } else if (n == WS_AGAIN) {
-            free(frame);
-            return WS_AGAIN;
-        } else {
-            free(frame);
-            return WS_ERROR;
-        }
-    }
-
+    int rc = io->write(io->ctx, frame, len);
     free(frame);
-    return (int)total_sent;
+    return rc;
 }
+
 int ws_recv_step(ws_io_t *io, ws_recv_ctx_t *ctx, uint8_t **out, size_t *out_len, ws_thread_ctx_t *flags) {
     size_t n;
     int rc;
@@ -680,7 +639,7 @@ void push_json(ws_thread_ctx_t *ctx, char *json) {
     }
 }
 int pre_ws_loop(ws_thread_ctx_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
-    int sock = flags->sock;
+    int sock = flags->io.sock;
     (void)sock;
     (void)ws_recv_ctx;
     ws_io_t *io = &flags->io;
@@ -699,33 +658,10 @@ int pre_ws_loop(ws_thread_ctx_t *flags, ws_recv_ctx_t *ws_recv_ctx) {
 }
 
 int ws_send_close(ws_io_t *io, uint16_t code) {
-    uint8_t header[14];
-    uint8_t mask[4];
-    size_t head_len = 0;
-
-    if (getrandom(mask, 4, 0) != 4)
-        return -1;
-
-    header[head_len++] = 0x88;
-    header[head_len++] = 0x80 | 2;
-
-    memcpy(header + head_len, mask, 4);
-    head_len += 4;
-
-    uint8_t payload[2];
-    payload[0] = (code >> 8) & 0xFF;
-    payload[1] = code & 0xFF;
-
-    payload[0] ^= mask[0];
-    payload[1] ^= mask[1];
-
-    uint8_t frame[16];
-    memcpy(frame, header, head_len);
-    memcpy(frame + head_len, payload, 2);
-
-    size_t total_len = head_len + 2;
+    size_t total_len = 0;
+    uint8_t payload[2] = {code >> 8, code & 0xFF};
+    uint8_t *frame = ws_build_frame(WS_OPCODE_CLOSE, payload, 2, true, &total_len);
     size_t sent = 0;
-
     while (sent < total_len) {
         int n = io->write(io->ctx, frame + sent, total_len - sent);
 
@@ -797,9 +733,15 @@ void* websocket_thread(void *ctx) {
                     &msg_len,
                     flags
                 );
-
+                if (rc == WS_NORMAL_CLOSE) {
+                    ws_send_close(&flags->io, WS_NORMAL_CLOSE);
+                    goto cleanup;
+                }
                 if (rc == WS_ERROR || rc == WS_CLOSED) {
                     goto cleanup;
+                }
+                if (msg) {
+                    push_json(ctx, (char *)msg);
                 }
 
                 if (!flags->want_write) {
@@ -808,7 +750,13 @@ void* websocket_thread(void *ctx) {
 
                     if (json) {
 
-                        flags->out_frame = build_frame(json, &flags->out_len);
+                        flags->out_frame = ws_build_frame(
+                            WS_OPCODE_TEXT,
+                            (uint8_t*)json,
+                            strlen(json),
+                            true,
+                            &flags->out_len
+                        );
 
                         flags->out_sent = 0;
                         flags->want_write = true;
@@ -817,12 +765,12 @@ void* websocket_thread(void *ctx) {
 
                         struct epoll_event mod = {
                             .events = EPOLLIN | EPOLLOUT,
-                            .data.fd = flags->sock
+                            .data.fd = flags->io.sock
                         };
 
                         epoll_ctl(epfd,
                                   EPOLL_CTL_MOD,
-                                  flags->sock,
+                                  flags->io.sock,
                                   &mod);
                     }
                 }
@@ -850,12 +798,12 @@ void* websocket_thread(void *ctx) {
 
                             struct epoll_event mod = {
                                 .events = EPOLLIN,
-                                .data.fd = flags->sock
+                                .data.fd = flags->io.sock
                             };
 
                             epoll_ctl(epfd,
                                       EPOLL_CTL_MOD,
-                                      flags->sock,
+                                      flags->io.sock,
                                       &mod);
                         }
 
@@ -872,11 +820,17 @@ void* websocket_thread(void *ctx) {
         }
     }
 
-    //printf("[WS] Thread exiting...\n");
+
     cleanup:
-    ws_quit(&ws_recv_ctx);
-    ws_clear_message(&ws_recv_ctx);
-    if (epfd != -1)
-        close(epfd);
-    return NULL;
+        //printf("[WS] Thread exiting...\n");
+        if (flags->out_frame) {
+            free(flags->out_frame);
+            flags->out_frame = NULL;
+        }
+        ws_quit(&ws_recv_ctx);
+        ws_clear_message(&ws_recv_ctx);
+        if (epfd != -1)
+            close(epfd);
+        atomic_store(&flags->running, false);
+        return NULL;
 }
