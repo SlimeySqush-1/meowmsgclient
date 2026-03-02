@@ -3,6 +3,8 @@
 #include <ncurses.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <cjson/cJSON.h>
 #include <stdlib.h>
 #include <time.h>
@@ -53,8 +55,7 @@ char *format_msg(const char *channel, const char *message) {
     return result;
 }
 
-void push_json_outbound(ws_thread_ctx_t *ctx, const char *json)
-{
+void push_json_outbound(ws_thread_ctx_t *ctx, const char *json) {
     if (!json) return;
 
     char *copy = strdup(json);
@@ -63,10 +64,12 @@ void push_json_outbound(ws_thread_ctx_t *ctx, const char *json)
     if (rb_enqueue(&ctx->json_outbound, copy) != 0) {
         printf("[IF] outbound queue full, dropping\n");
         free(copy);
+    } else {
+        uint64_t one = 1;
+        write(ctx->wake_fd, &one, sizeof(uint64_t));
     }
 }
-void push_message(char *chn, char *msg, ws_thread_ctx_t *ctx)
-{
+void push_message(char *chn, char *msg, ws_thread_ctx_t *ctx) {
     if (!msg) return;
 
     char *json = format_msg(chn, msg);
@@ -268,6 +271,9 @@ void* interface(void *ctx) {
             werase(input_win);
             box(input_win, 0, 0);
             mvwprintw(input_win, 1, 2, "> %s", input_buffer);
+            wnoutrefresh(msg_win);
+            wnoutrefresh(input_win);
+            doupdate();
             wrefresh(input_win);
 
         }

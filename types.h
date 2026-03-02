@@ -20,7 +20,11 @@ typedef struct {
     void *ctx;
 } ws_io_t;
 
-
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    size_t sent;
+} ws_pending_t;
 
 typedef struct {
     char **message;
@@ -36,7 +40,10 @@ typedef struct {
     int sock;
     SSL *ssl;
     ws_io_t io;
+    int epfd;
+    int wake_fd;
 
+    ws_pending_t outbound;
     ws_queue_t json_inbound;
     ws_queue_t json_outbound;
     ws_queue_t console_outbound;
