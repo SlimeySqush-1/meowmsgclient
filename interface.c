@@ -111,7 +111,7 @@ void* interface(void *ctx) {
     int height, width;
 
     initscr();
-    raw();
+    cbreak();
     noecho();
     keypad(stdscr, TRUE);
 
@@ -123,7 +123,6 @@ void* interface(void *ctx) {
     input_win = newwin(3, width, height - 3, 0);
     keypad(input_win, TRUE);
     nodelay(input_win, TRUE);
-    wtimeout(input_win, 0);
 
     char input_buffer[MAX_INPUT] = {0};
     int input_ptr = 0;
@@ -140,23 +139,14 @@ void* interface(void *ctx) {
 
     while (atomic_load(&flags->running)) {
         char *msg;
-        int msg_count = 0;
         while ((msg = rb_dequeue(&flags->console_outbound)) != NULL) {
             wprintw(msg_win, "remote: %s\n", msg);
-            msg_count++;
             free(msg);
         }
-        if (msg_count > 0) {
-            wprintw(msg_win, "[DEBUG: displayed %d messages]\n", msg_count);
-        }
-        //wrefresh(msg_win);
+        wrefresh(msg_win);
 
         int ch = wgetch(input_win);
-        static int loop_count = 0;
-        if (++loop_count % 100 == 0) {
-            wprintw(msg_win, "[DEBUG: loop ran %d times, ch=%d]\n", loop_count, ch);
-            wrefresh(msg_win);
-        }
+
         if (ch != ERR) {
             if (ch == '\n' || ch == KEY_ENTER) {
 
@@ -276,17 +266,16 @@ void* interface(void *ctx) {
                     }
                 }
             }
+
+            wrefresh(msg_win);
+            werase(input_win);
+            box(input_win, 0, 0);
+            mvwprintw(input_win, 1, 2, "> %s", input_buffer);
+            wrefresh(input_win);
+
         }
-        touchwin(msg_win);
-        //wrefresh(msg_win);
-        werase(input_win);
-        box(input_win, 0, 0);
-        mvwprintw(input_win, 1, 2, "> %s", input_buffer);
-        //wrefresh(input_win);
+        wrefresh(msg_win);
         wmove(input_win, 1, 4 + input_ptr);
-        wnoutrefresh(msg_win);
-        wnoutrefresh(input_win);
-        doupdate();
         napms(10);
     }
 
