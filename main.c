@@ -56,7 +56,7 @@ int main(void) {
 
     ws_io_t io;
     memset(&io, 0, sizeof(io));
-
+    io.sock = sock;
     if (use_tls) {
         io.encrypted = true;
         io.read = tls_read;

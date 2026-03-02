@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include "utils.h"
 
-//get event and shi idk
 void get_event(ws_thread_ctx_t *ctx) {
     char *json_text = rb_dequeue(&ctx->json_inbound);
     if (!json_text) {
