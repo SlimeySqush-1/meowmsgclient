@@ -691,22 +691,19 @@ int flush_outbound(ws_thread_ctx_t *flags) {
         if (n > 0) {
             out->sent += n;
         } else if (n == WS_AGAIN) {
-            // BUFFER FULL: We must stop and wait for EPOLLOUT
             struct epoll_event ev = { .events = EPOLLIN | EPOLLOUT, .data.fd = flags->io.sock };
             epoll_ctl(flags->epfd, EPOLL_CTL_MOD, flags->io.sock, &ev);
             return WS_AGAIN;
         } else {
-            return WS_ERROR; // Socket died
+            return WS_ERROR;
         }
     }
 
-    // SUCCESS: Everything sent
     free(out->data);
     out->data = NULL;
     out->len = 0;
     out->sent = 0;
 
-    // Stop listening for EPOLLOUT to save CPU cycles
     struct epoll_event ev = { .events = EPOLLIN, .data.fd = flags->io.sock };
     epoll_ctl(flags->epfd, EPOLL_CTL_MOD, flags->io.sock, &ev);
     return WS_OK;
@@ -790,8 +787,7 @@ void* websocket_thread(void *ctx) {
 
             int fd = events[i].data.fd;
             if (fd == flags->wake_fd) {
-                uint64_t c; read(fd, &c, 8);
-
+                uint64_t c; (void)read(fd, &c, 8);
                 char *msg;
                 while ((msg = rb_dequeue(&flags->json_outbound))) {
 
